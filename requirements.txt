@@ -2,3 +2,6 @@ pandas
 openpyxl
 requests
 beautifulsoup4
+neo4j
+python-dotenv
+certifi

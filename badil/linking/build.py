@@ -9,6 +9,7 @@ from badil.paths import DATA_PROCESSED, DATA_RAW
 CNAM_FILE = DATA_PROCESSED / "medicines_cnam.csv"
 MEDTN_FILE = DATA_RAW / "medtn" / "enrichment.jsonl"
 DAWI_FILE = DATA_RAW / "dawi" / "stock.jsonl"
+BDPM_FILE = DATA_RAW / "bdpm" / "leaflets.jsonl"
 MEDICINES_FILE = DATA_PROCESSED / "medicines.jsonl"
 SUBSTITUTES_FILE = DATA_PROCESSED / "substitutes.jsonl"
 
@@ -40,10 +41,24 @@ def to_float(value) -> float | None:
         return None
 
 
+def load_bdpm() -> dict[tuple[str, str | None], dict]:
+    if not BDPM_FILE.exists():
+        return {}
+    records = {}
+    with BDPM_FILE.open(encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            records[(record["active_ingredient"], record.get("dose"))] = record
+    return records
+
+
 def build_medicines() -> list[dict]:
     cnam = pd.read_csv(CNAM_FILE, dtype={"pct_code": str})
     medtn = load_jsonl(MEDTN_FILE)
     dawi = load_jsonl(DAWI_FILE)
+    bdpm = load_bdpm()
 
     medicines = []
     for row in cnam.to_dict("records"):
@@ -51,6 +66,8 @@ def build_medicines() -> list[dict]:
         medtn_record = medtn.get(pct_code, {})
         dawi_record = dawi.get(pct_code, {})
         dosage = medtn_record.get("dosage") or extract_dose(row["brand_name"])
+        dose = extract_dose(dosage) if dosage else None
+        bdpm_record = bdpm.get((row["active_ingredient"], dose), {})
         medicines.append({
             "pct_code": pct_code,
             "brand_name": row["brand_name"],
@@ -58,12 +75,13 @@ def build_medicines() -> list[dict]:
             "category": row["category"],
             "prior_authorization": row["prior_authorization"],
             "public_price": to_float(row["public_price"]),
-            "dose": extract_dose(dosage) if dosage else None,
+            "dose": dose,
             "form": medtn_record.get("form"),
             "laboratory": medtn_record.get("laboratory"),
             "therapeutic_class": medtn_record.get("therapeutic_class"),
             "sub_class": medtn_record.get("sub_class"),
             "indication": medtn_record.get("indication"),
+            "has_safety_data": bool(bdpm_record),
             "dawi_price": to_float(dawi_record.get("price")),
             "out_of_stock": dawi_record.get("out_of_stock"),
         })
