@@ -5,3 +5,9 @@ beautifulsoup4
 neo4j
 python-dotenv
 certifi
+langgraph
+groq
+sentence-transformers
+qdrant-client
+scikit-learn
+joblib

@@ -19,12 +19,14 @@ LEAFLET_BATCH_SIZE = 20
 NODE_PROPERTIES = [
     "pct_code", "brand_name", "active_ingredient", "category", "dose", "form",
     "laboratory", "therapeutic_class", "sub_class", "indication", "public_price",
-    "dawi_price", "out_of_stock", "has_safety_data",
+    "dawi_price", "out_of_stock", "has_safety_data", "dawi_checked_at", "prior_authorization",
+    "pack_unit", "pack_amount",
 ]
 
 LEAFLET_PROPERTIES = [
     "key", "cis_code", "denomination", "active_ingredient", "dose", "posology",
     "contraindications", "warnings", "interactions", "side_effects", "overdose",
+    "official_updated_at", "crawled_at",
 ]
 
 
@@ -90,13 +92,19 @@ def link_leaflets(session, medicines: list[dict]) -> int:
     return len(rows)
 
 
+def delete_edges(session) -> None:
+    session.run("MATCH ()-[r:SUBSTITUTE]->() CALL (r) { DELETE r } IN TRANSACTIONS OF 10000 ROWS")
+
+
 def load_edges(session, substitutes: list[dict]) -> None:
     query = """
     UNWIND $rows AS row
     MATCH (source:Medicine {pct_code: row.source_code})
     MATCH (target:Medicine {pct_code: row.pct_code})
     MERGE (source)-[r:SUBSTITUTE]->(target)
-    SET r.tier = row.tier, r.out_of_stock = row.out_of_stock, r.public_price = row.public_price
+    SET r.tier = row.tier, r.out_of_stock = row.out_of_stock, r.public_price = row.public_price,
+        r.score = row.score, r.equivalence = row.equivalence, r.rank = row.rank,
+        r.price_ratio = row.price_ratio, r.price_basis = row.price_basis
     """
     rows = []
     for record in substitutes:
@@ -118,6 +126,7 @@ def run() -> None:
         load_nodes(session, medicines)
         load_leaflets(session, leaflets)
         leaflet_link_count = link_leaflets(session, medicines)
+        delete_edges(session)
         edge_count = load_edges(session, substitutes)
     driver.close()
     print(

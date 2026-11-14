@@ -1,8 +1,11 @@
 import json
+import re
 import sys
 from datetime import datetime, timezone
 
 from bs4 import BeautifulSoup
+
+UPDATED_AT_RE = re.compile(r"Mis à jour le\s*:?\s*(\d{2}/\d{2}/\d{4})")
 
 from badil.crawl.dose import extract_dose
 from badil.crawl.http import get
@@ -111,6 +114,8 @@ def parse_rcp_sections(html: str) -> dict:
                 parts.append(text)
             node = node.find_next_sibling()
         sections[key] = " ".join(parts).strip()
+    match = UPDATED_AT_RE.search(panel.get_text(" ", strip=True))
+    sections["official_updated_at"] = match.group(1) if match else None
     return sections
 
 

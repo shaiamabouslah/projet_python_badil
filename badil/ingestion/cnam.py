@@ -1,9 +1,12 @@
+import re
+
 import pandas as pd
 
 from badil.paths import DATA_RAW, DATA_PROCESSED
 
 RAW_FILE = DATA_RAW / "cnam" / "liste_medicaments_vei_2026-06-17.xlsx"
 OUTPUT_FILE = DATA_PROCESSED / "medicines_cnam.csv"
+LIST_DATE = re.search(r"(\d{4}-\d{2}-\d{2})", RAW_FILE.name).group(1)
 
 COLUMN_MAP = {
     "CODE_PCT": "pct_code",

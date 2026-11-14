@@ -1,0 +1,28 @@
+{
+  "split_sizes": {
+    "train": 41589,
+    "calibration": 14068,
+    "test": 11653
+  },
+  "official_pairs_with_different_ingredient_codes": 1098,
+  "test_pairs": 11653,
+  "test_positives": 5607,
+  "test_negatives": 6046,
+  "auc": 0.975,
+  "hand_rule": {
+    "false_approve_rate": 0.0294,
+    "equivalents_found": 0.7988
+  },
+  "conformal_alpha_0.05": {
+    "false_approve_rate": 0.0405,
+    "equivalents_found": 0.9806,
+    "equivalents_wrongly_rejected": 0.0166,
+    "uncertain_rate": 0.0021
+  },
+  "conformal_alpha_0.02": {
+    "false_approve_rate": 0.0045,
+    "equivalents_found": 0.0317,
+    "equivalents_wrongly_rejected": 0.0078,
+    "uncertain_rate": 0.4912
+  }
+}
