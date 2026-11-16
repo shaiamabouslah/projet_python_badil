@@ -1,0 +1,29 @@
+{
+  "narrow_therapeutic_index": {
+    "description": "Médicaments à marge thérapeutique étroite (MTE) : la substitution chez un patient stabilisé est exclue sur décision du prescripteur (mention « non substituable MTE ») ou du pharmacien (« MTE-PH »).",
+    "source": "Arrêté du 12 novembre 2019 (art. L. 5125-23 CSP), annexe modifiée par l'arrêté du 20 juillet 2022",
+    "url": "https://www.legifrance.gouv.fr/loda/id/JORFTEXT000039393124/2025-04-19",
+    "checked_on": "2026-11-16",
+    "substances": [
+      "lamotrigine", "pregabaline", "zonisamide", "levetiracetam", "topiramate", "valproate",
+      "levothyroxine", "mycophenolate", "buprenorphine", "azathioprine", "ciclosporine",
+      "everolimus", "lacosamide", "oxcarbazepine"
+    ]
+  },
+  "generic_register": {
+    "description": "Une substitution directe exige que la molécule figure dans le Répertoire officiel des groupes génériques ; les médicaments biologiques (insulines, héparines de bas poids moléculaire...) relèvent d'un régime distinct, plus restrictif.",
+    "source": "ANSM, Répertoire des groupes génériques (fichier CIS_GENER_bdpm.txt de la BDPM)",
+    "url": "https://base-donnees-publique.medicaments.gouv.fr/telechargement",
+    "checked_on": "2026-11-16"
+  },
+  "inhaled_devices": {
+    "description": "Pour les inhalateurs, un substitut équivalent peut utiliser un dispositif différent : la technique d'inhalation doit être vérifiée avec le pharmacien.",
+    "source": "Bon usage des dispositifs d'inhalation (recommandation de pratique)",
+    "checked_on": "2026-11-16"
+  },
+  "substitution_right": {
+    "description": "Le droit de substitution porte sur un médicament de même principe actif, même dosage et même forme ; il ne s'applique pas si l'ordonnance porte la mention « non substituable » ni, selon les sources consultées, aux médicaments à marge thérapeutique étroite.",
+    "source": "Sources secondaires (presse professionnelle) ; texte juridique tunisien non consulté, à confirmer",
+    "checked_on": "2026-11-16"
+  }
+}

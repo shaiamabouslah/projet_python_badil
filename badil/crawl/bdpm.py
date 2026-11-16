@@ -7,15 +7,21 @@ from bs4 import BeautifulSoup
 
 UPDATED_AT_RE = re.compile(r"Mis à jour le\s*:?\s*(\d{2}/\d{2}/\d{4})")
 
-from badil.crawl.dose import extract_dose
 from badil.crawl.http import get
+from badil.jsonl import append_jsonl, read_jsonl
 from badil.paths import DATA_PROCESSED, DATA_RAW
+from badil.scorer.apply import route_of
+from badil.scorer.features import normalize, strength_numbers
 
 BASE_URL = "https://base-donnees-publique.medicaments.gouv.fr"
 SPECIALTIES_URL = f"{BASE_URL}/download/file/CIS_bdpm.txt"
 DETAIL_URL = BASE_URL + "/medicament/{cis_code}/extrait"
 
 SPECIALTIES_CACHE = DATA_RAW / "bdpm" / "CIS_bdpm.txt"
+COMPOSITION_FILE = DATA_RAW / "bdpm" / "CIS_COMPO_bdpm.txt"
+STEM_LENGTH = 6
+INGREDIENT_SPLIT_RE = re.compile(r"\s*[+/]\s*")
+WORD_RE = re.compile(r"[a-z]{4,}")
 OUTPUT_FILE = DATA_RAW / "bdpm" / "leaflets.jsonl"
 MEDICINES_FILE = DATA_PROCESSED / "medicines.jsonl"
 
@@ -24,28 +30,32 @@ SECTION_KEYS = {
     "4.3": "contraindications",
     "4.4": "warnings",
     "4.5": "interactions",
+    "4.6": "pregnancy",
     "4.8": "side_effects",
     "4.9": "overdose",
 }
 
-ROUTE_KEYWORDS = {
-    "orale": ["orale", "comprim", "gelule", "gélule", "sirop", "sachet", "susp"],
-    "cutanée": ["cutan", "dermique", "pommade", "crème", "creme", "gel derm"],
-    "injectable": ["injectable", "perfusion", "intraveineuse", "intramusculaire"],
-    "ophtalmique": ["ophtalmique", "collyre"],
-    "rectale": ["rectale", "suppositoire"],
-    "nasale": ["nasale"],
+BDPM_ROUTES = {
+    "oral": ("orale", "sublinguale", "buccale"),
+    "topical": ("cutanée",),
+    "injectable": ("intraveineuse", "intramusculaire", "sous-cutanée", "intradermique", "intra-articulaire",
+                   "intrathécale", "péridurale", "intravésicale"),
+    "ophthalmic": ("ophtalmique",),
+    "rectal": ("rectale",),
+    "nasal": ("nasale",),
+    "inhaled": ("inhalée",),
+    "vaginal": ("vaginale",),
+    "auricular": ("auriculaire",),
+    "patch": ("transdermique",),
 }
 
 
-def infer_route(form_text: str | None) -> str | None:
-    if not form_text:
-        return None
-    lowered = form_text.lower()
-    for route, keywords in ROUTE_KEYWORDS.items():
-        if any(keyword in lowered for keyword in keywords):
-            return route
-    return None
+def leaflet_key(active_ingredient: str, dose: str | None, route: str | None) -> str:
+    return f"{active_ingredient}|{dose or ''}|{route or ''}"
+
+
+def medicine_leaflet_key(medicine: dict) -> str:
+    return leaflet_key(medicine["active_ingredient"], medicine.get("dose"), route_of(medicine))
 
 
 def load_specialties() -> list[dict]:
@@ -68,28 +78,44 @@ def load_specialties() -> list[dict]:
     return specialties
 
 
-def match_candidates(
-    specialties: list[dict], active_ingredient: str, dose: str | None, route_hint: str | None
-) -> list[dict]:
-    needle = active_ingredient.upper()
-    pool = [s for s in specialties if needle in s["denomination"].upper()]
+def stems(text: str) -> set[str]:
+    return {word[:STEM_LENGTH] for word in WORD_RE.findall(normalize(text))}
 
-    def dose_ok(s: dict) -> bool:
-        return dose is not None and extract_dose(s["denomination"]) == dose
 
-    def route_ok(s: dict) -> bool:
-        return route_hint is not None and route_hint in s["route"].lower()
+def load_compositions() -> dict[str, list[set[str]]]:
+    by_link = {}
+    for line in COMPOSITION_FILE.read_text(encoding="latin-1").splitlines():
+        columns = line.split("	")
+        if len(columns) < 8:
+            continue
+        by_link.setdefault(columns[0], {}).setdefault(columns[7], set()).update(stems(columns[3]))
+    return {cis: list(links.values()) for cis, links in by_link.items()}
 
-    both = [s for s in pool if dose_ok(s) and route_ok(s)]
-    if both:
-        return both
-    route_only = [s for s in pool if route_ok(s)]
-    if route_only:
-        return route_only
-    dose_only = [s for s in pool if dose_ok(s)]
-    if dose_only:
-        return dose_only
-    return []
+
+def same_ingredients(active_ingredient: str, composition: list[set[str]]) -> bool:
+    parts = [stems(part) for part in INGREDIENT_SPLIT_RE.split(active_ingredient) if stems(part)]
+    if len(parts) != len(composition):
+        return False
+    remaining = list(composition)
+    for part in parts:
+        hit = next((link for link in remaining if part & link), None)
+        if hit is None:
+            return False
+        remaining.remove(hit)
+    return True
+
+
+def match_candidates(specialties: list[dict], compositions: dict[str, list[set[str]]], active_ingredient: str,
+                     brand_name: str, route: str | None) -> list[dict]:
+    if route is None:
+        return []
+    pool = [
+        s for s in specialties
+        if any(r in s["route"].lower() for r in BDPM_ROUTES[route])
+        and same_ingredients(active_ingredient, compositions.get(s["cis_code"], []))
+    ]
+    numbers = set(strength_numbers(brand_name))
+    return [s for s in pool if numbers <= set(strength_numbers(s["denomination"]))]
 
 
 def parse_rcp_sections(html: str) -> dict:
@@ -124,39 +150,28 @@ def fetch_detail(cis_code: str) -> dict:
     return parse_rcp_sections(response.text)
 
 
-def enrich_group(
-    specialties: list[dict], active_ingredient: str, dose: str | None, form: str | None
-) -> dict | None:
-    route_hint = infer_route(form)
-    candidates = match_candidates(specialties, active_ingredient, dose, route_hint)
+def enrich_group(specialties: list[dict], compositions: dict, medicine: dict) -> dict | None:
+    candidates = match_candidates(specialties, compositions, medicine["active_ingredient"], medicine["brand_name"],
+                                  route_of(medicine))
     for candidate in candidates:
         sections = fetch_detail(candidate["cis_code"])
         if sections:
-            return {
-                "cis_code": candidate["cis_code"],
-                "denomination": candidate["denomination"],
-                **sections,
-            }
+            return {"cis_code": candidate["cis_code"], "denomination": candidate["denomination"],
+                    "route": route_of(medicine), **sections}
     return None
 
 
-def unique_targets() -> list[tuple[str, str | None, str | None]]:
-    seen = set()
-    targets = []
+def unique_targets() -> list[dict]:
+    targets = {}
     with MEDICINES_FILE.open(encoding="utf-8") as f:
         for line in f:
-            if not line.strip():
-                continue
-            record = json.loads(line)
-            key = (record["active_ingredient"], record.get("dose"))
-            if key not in seen:
-                seen.add(key)
-                targets.append((*key, record.get("form")))
-    return targets
+            if line.strip():
+                medicine = json.loads(line)
+                targets.setdefault(medicine_leaflet_key(medicine), medicine)
+    return list(targets.values())
 
 
 def save_record(key: str, active_ingredient: str, dose: str | None, detail: dict) -> None:
-    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
     record = {
         "key": key,
         "active_ingredient": active_ingredient,
@@ -164,39 +179,35 @@ def save_record(key: str, active_ingredient: str, dose: str | None, detail: dict
         **detail,
         "crawled_at": datetime.now(timezone.utc).isoformat(),
     }
-    with OUTPUT_FILE.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    append_jsonl(OUTPUT_FILE, record)
 
 
 def already_done() -> set[str]:
-    if not OUTPUT_FILE.exists():
-        return set()
-    with OUTPUT_FILE.open(encoding="utf-8") as f:
-        return {json.loads(line)["key"] for line in f if line.strip()}
+    return {record["key"] for record in read_jsonl(OUTPUT_FILE)}
 
 
 def run(limit: int) -> None:
     specialties = load_specialties()
+    compositions = load_compositions()
     targets = unique_targets()[:limit]
     done = already_done()
     found = 0
-    for i, (active_ingredient, dose, form) in enumerate(targets):
-        key = f"{active_ingredient}|{dose or ''}"
+    for i, medicine in enumerate(targets):
+        key = medicine_leaflet_key(medicine)
         if key in done:
             continue
         try:
-            detail = enrich_group(specialties, active_ingredient, dose, form)
+            detail = enrich_group(specialties, compositions, medicine)
         except Exception as error:
             detail = None
-            print(f"{i + 1}/{len(targets)}: {active_ingredient} {dose} -> error: {error}", flush=True)
-        else:
-            print(f"{i + 1}/{len(targets)}: {active_ingredient} {dose} -> {'ok' if detail else 'not found'}", flush=True)
+            print(f"{i + 1}/{len(targets)}: {key} -> error: {error}", flush=True)
         if detail is not None:
-            save_record(key, active_ingredient, dose, detail)
+            save_record(key, medicine["active_ingredient"], medicine.get("dose"), detail)
             found += 1
+        if (i + 1) % 100 == 0:
+            print(f"{i + 1}/{len(targets)} targets, {found} leaflets", flush=True)
     print(f"done: {found}/{len(targets)} newly enriched")
 
 
 if __name__ == "__main__":
-    n = int(sys.argv[1]) if len(sys.argv) > 1 else 10
-    run(n)
+    run(int(sys.argv[1]) if len(sys.argv) > 1 else 100000)

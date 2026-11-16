@@ -1,0 +1,56 @@
+{
+ "names": {
+  "n": 519.0,
+  "top1": 0.983,
+  "hit5": 0.996,
+  "ms": 301.031,
+  "top1_arabic": 0.9,
+  "top1_brand": 1.0,
+  "top1_brand_dose": 1.0,
+  "top1_ingredient": 1.0,
+  "top1_typo": 0.959
+ },
+ "symptoms": {
+  "fr": {
+   "n": 20,
+   "p5": 0.78,
+   "hit5": 0.9,
+   "seconds": 0.13
+  },
+  "ar": {
+   "n": 20,
+   "p5": 0.71,
+   "hit5": 0.9,
+   "seconds": 0.12
+  }
+ },
+ "symptoms_condition_for_french": {
+  "fr": {
+   "n": 20,
+   "p5": 0.75,
+   "hit5": 0.9,
+   "seconds": 0.12
+  },
+  "ar": {
+   "n": 20,
+   "p5": 0.71,
+   "hit5": 0.9,
+   "seconds": 0.13
+  }
+ },
+ "symptoms_with_reranker": {
+  "fr": {
+   "n": 20,
+   "p5": 0.81,
+   "hit5": 0.9,
+   "seconds": 6.37
+  },
+  "ar": {
+   "n": 20,
+   "p5": 0.75,
+   "hit5": 0.9,
+   "seconds": 8.1
+  }
+ },
+ "note": "seconds exclude the cached Groq translation call (about 0.5 s when not cached)"
+}

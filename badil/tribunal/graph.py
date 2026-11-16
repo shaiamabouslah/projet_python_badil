@@ -1,15 +1,27 @@
 import json
+from datetime import datetime, timezone
+from functools import lru_cache
 from typing import TypedDict
 
 from langgraph.graph import END, StateGraph
 
-from badil.graph.query import find_medicine, get_substitutes
+from badil.graph.query import get_leaflets, get_medicine, get_substitutes
 from badil.ingestion.cnam import LIST_DATE as CNAM_LIST_DATE
+from badil.retrieval.names import other_presentations
+from badil.retrieval.names import resolve as resolve_name
+from badil.safety.patient import PatientProfile, assess
+from badil.safety.rules import FLAG_MESSAGES, NARROW_INDEX, flag_citation
 from badil.tribunal.llm import ask
 
 TIER_VALIDATION = {"green": None, "yellow": "pharmacist", "orange": "doctor"}
+VALIDATION_RANK = {None: 0, "pharmacist": 1, "doctor": 2}
+GREEN_CONDITION = (
+    "substitution par le pharmacien (même principe actif, dosage et forme), "
+    "sauf si l'ordonnance porte la mention « non substituable »"
+)
 MAX_ALTERNATIVES = 2
 PRICE_TOLERANCE = 0.2
+STALE_AFTER_DAYS = 3
 
 EXPLAIN_SYSTEM = (
     "Tu expliques à un patient tunisien une proposition de substitution de médicament. "
@@ -21,6 +33,8 @@ EXPLAIN_SYSTEM = (
 
 class TribunalState(TypedDict, total=False):
     query: str
+    profile: PatientProfile | None
+    resolution: dict
     source: dict | None
     candidates: list[dict]
     choice: dict | None
@@ -41,7 +55,7 @@ def build_citations(*records: dict | None) -> list[dict]:
             citations.append({
                 "source": "dawi.tn",
                 "date": short_date(record["dawi_checked_at"]),
-                "note": f"live stock check for {record.get('brand_name')}",
+                "note": f"stock check for {record.get('brand_name')}",
             })
         leaflet = record.get("leaflet")
         if leaflet:
@@ -53,12 +67,24 @@ def build_citations(*records: dict | None) -> list[dict]:
     return citations
 
 
-def stock_label(candidate: dict) -> str:
-    if candidate.get("out_of_stock") is False:
-        return f"en stock (dawi.tn, {short_date(candidate.get('dawi_checked_at'))})"
-    if candidate.get("out_of_stock") is True:
-        return "également en rupture de stock"
-    return "disponibilité inconnue"
+def stock_age_days(checked_at: str | None) -> int | None:
+    if not checked_at:
+        return None
+    return (datetime.now(timezone.utc) - datetime.fromisoformat(checked_at)).days
+
+
+def stock_label(record: dict) -> str:
+    status = record.get("out_of_stock")
+    if status is None:
+        return "disponibilité inconnue (produit introuvable sur dawi.tn)"
+    label = "en stock" if status is False else "en rupture de stock"
+    if record.get("stock_match") == "other_pack":
+        label += " (même produit, autre conditionnement)"
+    label += f" selon dawi.tn, vérifié le {short_date(record.get('dawi_checked_at'))}"
+    age = stock_age_days(record.get("dawi_checked_at"))
+    if age is not None and age > STALE_AFTER_DAYS:
+        label += f", il y a {age} jours : à reconfirmer"
+    return label
 
 
 def price_change(candidate: dict) -> str:
@@ -79,7 +105,11 @@ def price_evidence(source: dict, candidate: dict) -> tuple[str | None, str | Non
     return None, f"plus cher : {text}"
 
 
-def gather_evidence(source: dict, candidate: dict) -> dict:
+def strictest(*validations: str | None) -> str | None:
+    return max(validations, key=lambda v: VALIDATION_RANK[v])
+
+
+def gather_evidence(source: dict, candidate: dict, warnings: list[str]) -> dict:
     supporting, opposing = [], []
     tier = candidate["tier"]
     if tier == "green":
@@ -111,12 +141,27 @@ def gather_evidence(source: dict, candidate: dict) -> dict:
         opposing.append("aucune notice de sécurité disponible pour ce substitut")
     if candidate.get("prior_authorization"):
         opposing.append("nécessite un accord préalable de la CNAM")
+    opposing += [FLAG_MESSAGES[flag] for flag in candidate.get("safety_flags") or []]
+    opposing += warnings
     return {"for": supporting, "against": opposing}
 
 
-def choose(candidates: list[dict]) -> dict:
-    in_stock = [c for c in candidates if c.get("out_of_stock") is False]
-    return (in_stock or candidates)[0]
+def assess_candidates(candidates: list[dict], profile: PatientProfile | None) -> list[tuple[dict, dict]]:
+    leaflets = get_leaflets([c["leaflet"]["key"] for c in candidates if c.get("leaflet")]) if profile else {}
+    assessed = []
+    for candidate in candidates:
+        leaflet = leaflets.get((candidate.get("leaflet") or {}).get("key"))
+        assessed.append((candidate, assess(candidate, leaflet, profile)))
+    return assessed
+
+
+def choose(assessed: list[tuple[dict, dict]]) -> tuple[dict, dict, list[dict]]:
+    allowed = [(c, a) for c, a in assessed if not a["blocked"]]
+    excluded = [c for c, a in assessed if a["blocked"]]
+    pool = allowed or assessed
+    in_stock = [(c, a) for c, a in pool if c.get("out_of_stock") is False]
+    candidate, assessment = (in_stock or pool)[0]
+    return candidate, assessment, excluded
 
 
 def cheaper_equivalent(candidates: list[dict]) -> dict | None:
@@ -129,7 +174,12 @@ def cheaper_equivalent(candidates: list[dict]) -> dict | None:
 
 
 def resolve(state: TribunalState) -> TribunalState:
-    return {"source": find_medicine(state["query"])}
+    resolution = resolve_name(state["query"])
+    match = resolution["match"]
+    source = get_medicine(match["pct_code"]) if match else None
+    if source is not None:
+        source["other_presentations"] = other_presentations(match["pct_code"])
+    return {"resolution": resolution, "source": source}
 
 
 def fetch_candidates(state: TribunalState) -> TribunalState:
@@ -137,7 +187,9 @@ def fetch_candidates(state: TribunalState) -> TribunalState:
 
 
 def route_after_resolve(state: TribunalState) -> str:
-    return "not_found" if state["source"] is None else "fetch_candidates"
+    if state["source"] is not None:
+        return "fetch_candidates"
+    return "did_you_mean" if state["resolution"]["status"] == "uncertain" else "not_found"
 
 
 def route_after_fetch(state: TribunalState) -> str:
@@ -150,14 +202,21 @@ def route_after_fetch(state: TribunalState) -> str:
 
 def decide(state: TribunalState) -> TribunalState:
     source = state["source"]
+    profile = state.get("profile")
     source_in_stock = not source.get("out_of_stock")
-    if source_in_stock:
-        candidate = cheaper_equivalent(state["candidates"])
-    else:
-        candidate = choose(state["candidates"])
-    evidence = gather_evidence(source, candidate)
+    pool = [cheaper_equivalent(state["candidates"])] if source_in_stock else state["candidates"]
+    candidate, assessment, excluded = choose(assess_candidates(pool, profile))
+    if source_in_stock and assessment["blocked"]:
+        return in_stock_answer(state)
+    evidence = gather_evidence(source, candidate, assessment["warnings"])
     tier = candidate["tier"]
-    blocked = tier == "orange" and not candidate.get("leaflet")
+    blocked = (tier == "orange" and not candidate.get("leaflet")) or assessment["blocked"]
+    flags = set(candidate.get("safety_flags") or []) | set(source.get("safety_flags") or [])
+    validation = strictest(
+        TIER_VALIDATION[tier],
+        "doctor" if NARROW_INDEX in flags or assessment["needs_doctor"] else None,
+        "pharmacist" if flags or assessment["warnings"] else None,
+    )
     alternatives = [
         {"brand_name": c["brand_name"], "tier": c["tier"], "out_of_stock": c.get("out_of_stock")}
         for c in state["candidates"] if c["pct_code"] != candidate["pct_code"]
@@ -169,14 +228,18 @@ def decide(state: TribunalState) -> TribunalState:
             "decision": "refuse" if blocked else "approve",
             "reason": "cheaper" if source_in_stock else "out_of_stock",
             "tier": "red" if blocked else tier,
-            "requires_validation": "doctor" if blocked else TIER_VALIDATION[tier],
+            "requires_validation": "doctor" if blocked else validation,
+            "conditions": [GREEN_CONDITION] if tier == "green" and not blocked else [],
+            "patient_warnings": assessment["warnings"],
+            "safety_notes": [FLAG_MESSAGES[f] for f in sorted(flags)] + assessment["warnings"],
+            "excluded_for_patient": [c["brand_name"] for c in excluded][:MAX_ALTERNATIVES],
             "substitute": None if blocked else candidate["brand_name"],
             "substitute_pct_code": None if blocked else candidate["pct_code"],
             "equivalence_score": candidate.get("score"),
             "evidence_for": evidence["for"],
             "evidence_against": evidence["against"],
             "alternatives": alternatives,
-            "citations": build_citations(source, candidate),
+            "citations": build_citations(source, candidate) + [flag_citation(f) for f in sorted(flags)],
         },
     }
 
@@ -184,10 +247,13 @@ def decide(state: TribunalState) -> TribunalState:
 def explain(state: TribunalState) -> TribunalState:
     verdict = dict(state["verdict"])
     if verdict["decision"] == "refuse":
-        verdict["explanation"] = (
-            "Aucun substitut sûr n'a pu être confirmé : le substitut disponible contient un principe actif "
-            "différent et aucune notice de sécurité n'est disponible. Consultez votre médecin."
+        reason = (
+            "tous les substituts disponibles sont exclus pour ce patient"
+            if verdict["patient_warnings"] and verdict["excluded_for_patient"]
+            else "le substitut disponible contient un principe actif différent et aucune notice de sécurité "
+                 "n'est disponible"
         )
+        verdict["explanation"] = f"Aucun substitut sûr n'a pu être confirmé : {reason}. Consultez votre médecin."
     elif verdict["tier"] == "green":
         source, choice = state["source"], state["choice"]
         same = (
@@ -201,18 +267,34 @@ def explain(state: TribunalState) -> TribunalState:
                 f"({price_change(choice)})."
             )
         else:
-            verdict["explanation"] = f"{same} : la substitution est directe."
+            verdict["explanation"] = (
+                f"{same} : le pharmacien peut vous le délivrer à la place, "
+                f"sauf si l'ordonnance porte la mention « non substituable »."
+            )
+        if verdict["safety_notes"]:
+            verdict["explanation"] += " Attention : " + " ; ".join(verdict["safety_notes"]) + "."
     else:
         facts = {
             "medicament_demande": state["source"]["brand_name"],
             "substitut_propose": verdict["substitute"],
             "niveau": verdict["tier"],
             "validation_requise": verdict["requires_validation"],
+            "conditions": verdict["conditions"],
             "arguments_pour": verdict["evidence_for"],
             "arguments_contre": verdict["evidence_against"],
         }
-        verdict["explanation"] = ask(EXPLAIN_SYSTEM, json.dumps(facts, ensure_ascii=False))
+        try:
+            verdict["explanation"] = ask(EXPLAIN_SYSTEM, json.dumps(facts, ensure_ascii=False))
+        except Exception:
+            verdict["explanation"] = fallback_explanation(state["source"], verdict)
     return {"verdict": verdict}
+
+
+def fallback_explanation(source: dict, verdict: dict) -> str:
+    who = {"pharmacist": "votre pharmacien", "doctor": "votre médecin"}.get(verdict["requires_validation"], "votre pharmacien")
+    against = " ; ".join(verdict["evidence_against"]) or "aucun"
+    return (f"{verdict['substitute']} peut remplacer {source['brand_name']}, à faire valider par {who}. "
+            f"Points d'attention : {against}.")
 
 
 def in_stock_answer(state: TribunalState) -> TribunalState:
@@ -257,26 +339,51 @@ def not_found(state: TribunalState) -> TribunalState:
     }
 
 
+def did_you_mean(state: TribunalState) -> TribunalState:
+    suggestions = state["resolution"]["suggestions"]
+    return {
+        "verdict": {
+            "decision": "did_you_mean",
+            "explanation": f"Je n'ai pas reconnu « {state['query']} » avec certitude. Vouliez-vous dire : "
+                           f"{', '.join(suggestions)} ?",
+            "suggestions": suggestions,
+            "tier": None,
+            "requires_validation": None,
+            "substitute": None,
+            "substitute_pct_code": None,
+        }
+    }
+
+
+@lru_cache(maxsize=1)
 def build_graph():
     graph = StateGraph(TribunalState)
     for name, node in [
         ("resolve", resolve), ("fetch_candidates", fetch_candidates), ("decide", decide),
         ("explain", explain), ("in_stock_answer", in_stock_answer), ("refuse", refuse), ("not_found", not_found),
+        ("did_you_mean", did_you_mean),
     ]:
         graph.add_node(name, node)
     graph.set_entry_point("resolve")
     graph.add_conditional_edges(
-        "resolve", route_after_resolve, {"not_found": "not_found", "fetch_candidates": "fetch_candidates"}
+        "resolve", route_after_resolve,
+        {"not_found": "not_found", "did_you_mean": "did_you_mean", "fetch_candidates": "fetch_candidates"},
     )
     graph.add_conditional_edges(
         "fetch_candidates", route_after_fetch,
         {"in_stock": "in_stock_answer", "refuse": "refuse", "decide": "decide"},
     )
     graph.add_edge("decide", "explain")
-    for name in ("explain", "in_stock_answer", "refuse", "not_found"):
+    for name in ("explain", "in_stock_answer", "refuse", "not_found", "did_you_mean"):
         graph.add_edge(name, END)
     return graph.compile()
 
 
-def run(query: str) -> dict:
-    return build_graph().invoke({"query": query})["verdict"]
+def run(query: str, profile: PatientProfile | None = None) -> dict:
+    state = build_graph().invoke({"query": query, "profile": profile})
+    source = state.get("source")
+    return {
+        "medicine": source["brand_name"] if source else None,
+        "other_presentations": source.get("other_presentations", []) if source else [],
+        **state["verdict"],
+    }

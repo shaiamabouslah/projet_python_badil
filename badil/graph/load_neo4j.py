@@ -20,12 +20,13 @@ NODE_PROPERTIES = [
     "pct_code", "brand_name", "active_ingredient", "category", "dose", "form",
     "laboratory", "therapeutic_class", "sub_class", "indication", "public_price",
     "dawi_price", "out_of_stock", "has_safety_data", "dawi_checked_at", "prior_authorization",
-    "pack_unit", "pack_amount",
+    "pack_unit", "pack_amount", "medtn_url", "medtn_checked_at", "stock_match", "dawi_designation", "leaflet_key",
+    "safety_flags",
 ]
 
 LEAFLET_PROPERTIES = [
     "key", "cis_code", "denomination", "active_ingredient", "dose", "posology",
-    "contraindications", "warnings", "interactions", "side_effects", "overdose",
+    "contraindications", "warnings", "interactions", "pregnancy", "side_effects", "overdose", "route",
     "official_updated_at", "crawled_at",
 ]
 
@@ -82,14 +83,14 @@ def link_leaflets(session, medicines: list[dict]) -> int:
     MATCH (l:Leaflet {key: row.leaflet_key})
     MERGE (m)-[:HAS_LEAFLET]->(l)
     """
-    rows = [
-        {"pct_code": m["pct_code"], "leaflet_key": f"{m['active_ingredient']}|{m.get('dose') or ''}"}
-        for m in medicines
-        if m.get("has_safety_data")
-    ]
+    rows = [{"pct_code": m["pct_code"], "leaflet_key": m["leaflet_key"]} for m in medicines if m.get("leaflet_key")]
     for batch in batched(rows, BATCH_SIZE):
         session.run(query, rows=batch)
     return len(rows)
+
+
+def delete_leaflets(session) -> None:
+    session.run("MATCH (l:Leaflet) CALL (l) { DETACH DELETE l } IN TRANSACTIONS OF 1000 ROWS")
 
 
 def delete_edges(session) -> None:
@@ -104,7 +105,7 @@ def load_edges(session, substitutes: list[dict]) -> None:
     MERGE (source)-[r:SUBSTITUTE]->(target)
     SET r.tier = row.tier, r.out_of_stock = row.out_of_stock, r.public_price = row.public_price,
         r.score = row.score, r.equivalence = row.equivalence, r.rank = row.rank,
-        r.price_ratio = row.price_ratio, r.price_basis = row.price_basis
+        r.price_ratio = row.price_ratio, r.price_basis = row.price_basis, r.safety_flags = row.safety_flags
     """
     rows = []
     for record in substitutes:
@@ -124,6 +125,7 @@ def run() -> None:
     with driver.session() as session:
         create_constraint(session)
         load_nodes(session, medicines)
+        delete_leaflets(session)
         load_leaflets(session, leaflets)
         leaflet_link_count = link_leaflets(session, medicines)
         delete_edges(session)

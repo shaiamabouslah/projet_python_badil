@@ -6,7 +6,7 @@ from badil.paths import DATA_PROCESSED, DATA_RAW
 MEDICINES_FILE = DATA_PROCESSED / "medicines.jsonl"
 LEAFLETS_FILE = DATA_RAW / "bdpm" / "leaflets.jsonl"
 
-LEAFLET_SECTIONS = ["posology", "contraindications", "warnings", "interactions", "side_effects", "overdose"]
+LEAFLET_SECTIONS = ["posology", "contraindications", "warnings", "interactions", "pregnancy", "side_effects", "overdose"]
 CHUNK_CHARS = 1000
 OVERLAP_SENTENCES = 1
 SENTENCE_RE = re.compile(r"(?<=[.!?;])\s+")
@@ -38,10 +38,6 @@ def dedupe_by_text(records: list[dict]) -> list[dict]:
         entry = merged.setdefault(r["text"], {"id": f"text:{r['text']}", "text": r["text"], "payload": {"sources": []}})
         entry["payload"]["sources"].append(r["payload"])
     return list(merged.values())
-
-
-def leaflet_key(active_ingredient: str, dose: str | None) -> str:
-    return f"{active_ingredient}|{dose or ''}"
 
 
 def build_name_records() -> list[dict]:
@@ -83,8 +79,8 @@ def build_leaflet_records() -> list[dict]:
 
     representative = {}
     for m in medicines:
-        key = leaflet_key(m["active_ingredient"], m.get("dose"))
-        representative.setdefault(key, {"pct_code": m["pct_code"], "brand_name": m["brand_name"]})
+        if m.get("leaflet_key"):
+            representative.setdefault(m["leaflet_key"], {"pct_code": m["pct_code"], "brand_name": m["brand_name"]})
 
     records = []
     for key, leaflet in leaflets.items():

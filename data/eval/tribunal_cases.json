@@ -1,0 +1,14 @@
+[
+  {"category": "resolution", "query": "abboticne", "expected": "abboticine"},
+  {"category": "resolution", "query": "aprovel 150", "expected": "aprovel"},
+  {"category": "resolution", "query": "glucophage 1000", "expected": "glucophage"},
+  {"category": "resolution", "query": "carbolss", "expected": "carboless"},
+  {"category": "resolution", "query": "amlor 5", "expected": "amlor"},
+  {"category": "resolution", "query": "ديامكرون", "expected": "diamicron"},
+  {"category": "resolution", "query": "أملور", "expected": "amlor"},
+  {"category": "resolution", "query": "دوليبران", "expected": "doliprane"},
+  {"category": "resolution", "query": "caudet", "expected": "caduet"},
+  {"category": "resolution", "query": "xyzabc", "expected": null},
+  {"category": "resolution", "query": "bonjour", "expected": null},
+  {"category": "resolution", "query": "مرحبا", "expected": null}
+]

@@ -31,13 +31,13 @@ CATEGORY_PATTERNS = [
     ("nasal", r"nasal"),
     ("inhaled", r"inhal|aerosol|nebulis"),
     ("injectable", r"inject|perfusion|\binj\b|\bamp\b|ampoule"),
-    ("rectal", r"suppo|rectal"),
+    ("rectal", r"suppo|\bsupp\b|rectal"),
     ("vaginal", r"ovule|vaginal|gynecolog"),
     ("patch", r"dispositif|transdermique|patch"),
     ("topical", r"creme|pommade|\bpde\b|\bgel\b|lotion|externe|\bsol\.?\s*(us\.?\s*)?ext|\bus\.?\s*ext|application|\bderm|shampooing|vernis|cutane"),
     ("oral_powder", r"(poudre|pdre|granules).*(buvable|orale|\bor\b|susp)|sachet"),
     ("oral_liquid", r"sirop|buvable|\bbuv\b|gouttes|gttes|\bgtt\b|solution orale|susp\.?\s*or"),
-    ("oral_solid", r"comprime|\bcomp\b|gelule|capsule|dragee|gomme|pastille|lyophilisat|film"),
+    ("oral_solid", r"comprime|\bcomp\b|\bcps?\b|gelule|capsule|dragee|gomme|pastille|lyophilisat|film"),
 ]
 FLAG_PATTERNS = {
     "modified_release": r"liberation prolongee|liberation modifiee|\blp\b|\blm\b|retard|\bsr\b|\bxr\b|\bcr\b|\bmr\b",
@@ -155,3 +155,15 @@ def pair_features(a: dict, b: dict) -> list[float]:
         features[f"{flag}_equal"] = int(pa[flag] == pb[flag])
         features[f"{flag}_any"] = int(pa[flag] or pb[flag])
     return [float(features[name]) for name in FEATURE_NAMES]
+
+
+DAWI_PACK_RE = re.compile(r"\bf\s*/\s*\d+\s*[a-z]*|\b\d+\s*(?:d|doses?|unidoses?)\b")
+FORMER_CODE_RE = re.compile(r"\(ex[^)]*\)")
+
+
+def strength_numbers(text: str | None) -> list[float]:
+    cleaned = FORMER_CODE_RE.sub(" ", normalize(text))
+    cleaned = THOUSANDS_RE.sub("", cleaned.replace(",", "."))
+    for pattern in (PACK_COUNT_RE, PACK_ITEM_RE, PACK_VOLUME_RE, PACK_RE, DAWI_PACK_RE):
+        cleaned = pattern.sub(" ", cleaned)
+    return [float(n) for n in re.findall(r"\d+(?:\.\d+)?", cleaned)]

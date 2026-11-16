@@ -11,3 +11,5 @@ sentence-transformers
 qdrant-client
 scikit-learn
 joblib
+mcp>=2.3
+pytest

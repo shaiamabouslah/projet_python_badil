@@ -5,12 +5,15 @@ import pandas as pd
 
 from badil.crawl.dose import extract_dose
 from badil.paths import DATA_PROCESSED, DATA_RAW
+from badil.crawl.bdpm import medicine_leaflet_key
+from badil.crawl.dawi import latest_stock
+from badil.linking.dawi_match import MATCHES_FILE as DAWI_MATCHES_FILE
+from badil.safety.rules import allows_direct_swap, safety_flags
 from badil.scorer.apply import route_of, score_pairs
 from badil.scorer.features import pack_quantity
 
 CNAM_FILE = DATA_PROCESSED / "medicines_cnam.csv"
 MEDTN_FILE = DATA_RAW / "medtn" / "enrichment.jsonl"
-DAWI_FILE = DATA_RAW / "dawi" / "stock.jsonl"
 BDPM_FILE = DATA_RAW / "bdpm" / "leaflets.jsonl"
 MEDICINES_FILE = DATA_PROCESSED / "medicines.jsonl"
 SUBSTITUTES_FILE = DATA_PROCESSED / "substitutes.jsonl"
@@ -44,33 +47,29 @@ def to_float(value) -> float | None:
         return None
 
 
-def load_bdpm() -> dict[tuple[str, str | None], dict]:
+def load_leaflet_keys() -> set[str]:
     if not BDPM_FILE.exists():
-        return {}
-    records = {}
+        return set()
     with BDPM_FILE.open(encoding="utf-8") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            record = json.loads(line)
-            records[(record["active_ingredient"], record.get("dose"))] = record
-    return records
+        return {json.loads(line)["key"] for line in f if line.strip()}
 
 
 def build_medicines() -> list[dict]:
     cnam = pd.read_csv(CNAM_FILE, dtype={"pct_code": str})
     medtn = load_jsonl(MEDTN_FILE)
-    dawi = load_jsonl(DAWI_FILE)
-    bdpm = load_bdpm()
+    dawi_matches = load_jsonl(DAWI_MATCHES_FILE)
+    stock = latest_stock()
+    leaflet_keys = load_leaflet_keys()
 
     medicines = []
     for row in cnam.to_dict("records"):
         pct_code = row["pct_code"]
         medtn_record = medtn.get(pct_code, {})
-        dawi_record = dawi.get(pct_code, {})
+        match = dawi_matches.get(pct_code, {})
+        stock_match = match.get("status") if match.get("status") in ("verified", "other_pack") else None
+        dawi_record = stock.get(match.get("dawi_id"), {}) if stock_match else {}
         dosage = medtn_record.get("dosage") or extract_dose(row["brand_name"])
         dose = extract_dose(dosage) if dosage else None
-        bdpm_record = bdpm.get((row["active_ingredient"], dose), {})
         pack_unit, pack_amount = pack_quantity(row["brand_name"]) or (None, None)
         medicines.append({
             "pct_code": pct_code,
@@ -87,11 +86,19 @@ def build_medicines() -> list[dict]:
             "therapeutic_class": medtn_record.get("therapeutic_class"),
             "sub_class": medtn_record.get("sub_class"),
             "indication": medtn_record.get("indication"),
-            "has_safety_data": bool(bdpm_record),
+            "medtn_url": medtn_record.get("source_url"),
+            "medtn_checked_at": medtn_record.get("crawled_at"),
             "dawi_price": to_float(dawi_record.get("price")),
-            "dawi_checked_at": dawi_record.get("crawled_at"),
+            "dawi_checked_at": dawi_record.get("checked_at"),
+            "dawi_designation": match.get("designation") if stock_match else None,
+            "stock_match": stock_match,
             "out_of_stock": dawi_record.get("out_of_stock"),
         })
+    for medicine in medicines:
+        key = medicine_leaflet_key(medicine)
+        medicine["leaflet_key"] = key if key in leaflet_keys else None
+        medicine["has_safety_data"] = medicine["leaflet_key"] is not None
+        medicine["safety_flags"] = safety_flags(medicine["active_ingredient"], route_of(medicine))
     return medicines
 
 
@@ -120,6 +127,7 @@ def collect_candidates(medicines: list[dict]) -> dict[str, list[dict]]:
     by_ingredient = defaultdict(list)
     by_sub_class = defaultdict(list)
     routes = {m["pct_code"]: route_of(m) for m in medicines}
+    flags = {m["pct_code"]: safety_flags(m["active_ingredient"], routes[m["pct_code"]]) for m in medicines}
     for medicine in medicines:
         by_ingredient[medicine["active_ingredient"]].append(medicine)
         if medicine["sub_class"]:
@@ -150,6 +158,7 @@ def collect_candidates(medicines: list[dict]) -> dict[str, list[dict]]:
                 "price_ratio": ratio,
                 "price_basis": basis,
                 "laboratory": candidate["laboratory"],
+                "safety_flags": flags[code],
             })
         collected[source["pct_code"]] = candidates
     return collected
@@ -162,7 +171,8 @@ def assign_equivalence(medicines: list[dict], collected: dict[str, list[dict]]) 
     for (_, candidate), (score, decision) in zip(slots, results):
         candidate["score"] = score
         candidate["equivalence"] = decision
-        candidate["tier"] = TIER_GREEN if decision == "equivalent" else TIER_YELLOW
+        direct = decision == "equivalent" and allows_direct_swap(candidate["safety_flags"])
+        candidate["tier"] = TIER_GREEN if direct else TIER_YELLOW
 
 
 def build_substitutes(medicines: list[dict]) -> dict[str, list[dict]]:

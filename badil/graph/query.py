@@ -21,19 +21,6 @@ def get_driver():
     return _driver
 
 
-def find_medicine(name: str) -> dict | None:
-    query = """
-    MATCH (m:Medicine)
-    WHERE toLower(m.brand_name) CONTAINS toLower($name)
-    RETURN m
-    ORDER BY size(m.brand_name) ASC
-    LIMIT 1
-    """
-    with get_driver().session() as session:
-        record = session.run(query, name=name).single()
-        return dict(record["m"]) if record else None
-
-
 def get_medicine(pct_code: str) -> dict | None:
     query = """
     MATCH (m:Medicine {pct_code: $pct_code})
@@ -54,8 +41,9 @@ def get_substitutes(pct_code: str) -> list[dict]:
     MATCH (:Medicine {pct_code: $pct_code})-[s:SUBSTITUTE]->(c:Medicine)
     OPTIONAL MATCH (c)-[:HAS_LEAFLET]->(l:Leaflet)
     RETURN c {.pct_code, .brand_name, .active_ingredient, .sub_class, .public_price, .pack_amount, .prior_authorization,
-              .dawi_checked_at, tier: s.tier, out_of_stock: s.out_of_stock, score: s.score,
-              equivalence: s.equivalence, price_ratio: s.price_ratio, price_basis: s.price_basis} AS candidate,
+              .dawi_checked_at, .stock_match, tier: s.tier, out_of_stock: s.out_of_stock, score: s.score,
+              equivalence: s.equivalence, price_ratio: s.price_ratio, price_basis: s.price_basis,
+              safety_flags: s.safety_flags} AS candidate,
            l {.key, .official_updated_at, .crawled_at} AS leaflet
     ORDER BY s.rank ASC
     """
@@ -66,3 +54,24 @@ def get_substitutes(pct_code: str) -> list[dict]:
             candidate["leaflet"] = record["leaflet"]
             candidates.append(candidate)
         return candidates
+
+
+def get_medicines(pct_codes: list[str]) -> dict[str, dict]:
+    query = """
+    MATCH (m:Medicine) WHERE m.pct_code IN $codes
+    OPTIONAL MATCH (m)-[:HAS_LEAFLET]->(l:Leaflet)
+    RETURN m, l {.key, .official_updated_at, .crawled_at} AS leaflet
+    """
+    with get_driver().session() as session:
+        medicines = {}
+        for record in session.run(query, codes=pct_codes):
+            medicine = dict(record["m"])
+            medicine["leaflet"] = record["leaflet"]
+            medicines[medicine["pct_code"]] = medicine
+        return medicines
+
+
+def get_leaflets(keys: list[str]) -> dict[str, dict]:
+    query = "MATCH (l:Leaflet) WHERE l.key IN $keys RETURN l"
+    with get_driver().session() as session:
+        return {record["l"]["key"]: dict(record["l"]) for record in session.run(query, keys=keys)}

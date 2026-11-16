@@ -62,9 +62,33 @@ def index_records(collection: str, records: list[dict]) -> None:
         print(f"{collection}: {min(i + BATCH_SIZE, len(records))}/{len(records)}", flush=True)
 
 
+def all_ids(collection: str) -> set[str]:
+    ids, offset = set(), None
+    while True:
+        batch, offset = get_client().scroll(collection, limit=1000, offset=offset, with_payload=False, with_vectors=False)
+        ids |= {str(p.id) for p in batch}
+        if offset is None:
+            return ids
+
+
+def sync_records(collection: str, records: list[dict]) -> dict:
+    ensure_collection(collection)
+    client = get_client()
+    wanted = {point_id(r["id"]): r for r in records}
+    existing = all_ids(collection)
+    stale = sorted(existing - set(wanted))
+    if stale:
+        client.delete(collection, points_selector=stale)
+    for pid in sorted(existing & set(wanted)):
+        record = wanted[pid]
+        client.overwrite_payload(collection, payload={**record["payload"], "text": record["text"]}, points=[pid])
+    index_records(collection, [r for pid, r in wanted.items() if pid not in existing])
+    return {"deleted": len(stale), "updated": len(existing & set(wanted)), "added": len(set(wanted) - existing)}
+
+
 def build_all() -> None:
-    index_records(NAMES_COLLECTION, build_name_records())
-    index_records(CHUNKS_COLLECTION, dedupe_by_text(build_indication_records() + build_leaflet_records()))
+    print(NAMES_COLLECTION, sync_records(NAMES_COLLECTION, build_name_records()))
+    print(CHUNKS_COLLECTION, sync_records(CHUNKS_COLLECTION, dedupe_by_text(build_indication_records() + build_leaflet_records())))
 
 
 if __name__ == "__main__":
